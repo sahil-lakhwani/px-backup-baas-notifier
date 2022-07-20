@@ -21,6 +21,8 @@ spec:
       - command:
         - /controller
         env:
+          - name: INGRESS_URL
+            value: backupui-dev01.baas.portworx.dev
           - name: "WEBHOOK_URL"
             value: "http://tenant-deployment-notify-eventsource-svc.argo-events:8080/status"
           - name: "nsLabel"

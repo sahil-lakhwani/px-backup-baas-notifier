@@ -230,9 +230,8 @@ func (c *controller) handleNamespaceDeletion() bool {
 			return true
 		}
 		note := notification.Note{
-			State:          state, //TODO: handle unknown state transition error
-			Namespace:      namespace,
-			FailureMessage: "",
+			State:        state, //TODO: handle unknown state transition error
+			InstanceName: namespace,
 		}
 		if err := c.notifyClient.Send(note); err != nil {
 			Logger.Error(err, "Failed to send notification", "namespace", namespace)
@@ -261,9 +260,8 @@ func (c *controller) handleCRDeletion(obj interface{}) {
 			return
 		}
 		note := notification.Note{
-			State:          notificationstate,
-			Namespace:      ns,
-			FailureMessage: "",
+			State:        notificationstate,
+			InstanceName: ns,
 		}
 		if err := c.notifyClient.Send(note); err != nil {
 			Logger.Error(err, "Failed to send notification", "namespace", ns)
@@ -323,9 +321,8 @@ func (c *controller) handleBackupAndMongoCreateUpdateEvents() bool {
 	}
 
 	note := notification.Note{
-		State:          state, //TODO: handle unknown state transition error
-		Namespace:      ns,
-		FailureMessage: "",
+		State:        state, //TODO: handle unknown state transition error
+		InstanceName: ns,
 	}
 
 	err := c.notifyClient.Send(note) //TODO: check if notification send failed and retry in case of non 200

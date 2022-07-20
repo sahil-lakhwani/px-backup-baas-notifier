@@ -57,16 +57,20 @@ var BackupAndSchedulerStatusMapping = map[string]map[string]string{
 }
 
 type Note struct {
-	State          string `json:"state"`
-	FailureMessage string `json:"failure_message"`
-	Namespace      string `json:"namespace"`
+	State        string `json:"state"`
+	InstanceName string `json:"instance_name"`
+	IngressURL   string `json:"ingress_url"`
+	Route        string `json:"route"`
 }
 
 type Client struct {
 	WebhookURL string
+	IngressURL string
 }
 
 func (n *Client) Send(note Note) error {
+	note.IngressURL = n.IngressURL
+	note.Route = fmt.Sprintf("px-backup.%s:10002", note.InstanceName)
 	data, err := json.Marshal(note)
 	if err != nil {
 		return err

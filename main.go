@@ -94,7 +94,12 @@ func main() {
 	infFactory := dynamicinformer.NewDynamicSharedInformerFactory(dynClient, 0*time.Minute)
 
 	stopch := make(<-chan struct{})
-	notifyClient := notification.Client{WebhookURL: webhookURL}
+
+	ingressURL := os.Getenv("INGRESS_URL")
+	if ingressURL == "" {
+		log.Fatal("INGRESS_URL should not be empty")
+	}
+	notifyClient := notification.Client{WebhookURL: webhookURL, IngressURL: ingressURL}
 
 	c := newController(clientset, dynClient, infFactory, stopch, notifyClient, *schedule)
 
