@@ -38,6 +38,7 @@ type controller struct {
 	notifyClient        notification.Client
 	nsqueue             workqueue.RateLimitingInterface
 	backupqueue         workqueue.RateLimitingInterface
+	deletionqueue       workqueue.RateLimitingInterface
 	schedule            schedule.Schedule
 }
 
@@ -53,11 +54,17 @@ var mongoGVR = schema.GroupVersionResource{
 	Resource: "mongos",
 }
 
+// type NotificationRetryStatus struct {
+// 	needsRetry bool
+// 	backoff    time.Duration // default 2 min and doubles for every retry
+// 	id         string
+// }
+
 type NamespaceStateHistory struct {
 	backupStatus    types.Status
 	mongoStatus     types.Status
-	notification    string
 	schedulerStatus types.Status
+	notification    string
 	lastUpdate      time.Time
 }
 
@@ -72,8 +79,9 @@ func newController(client kubernetes.Interface, dynclient dynamic.Interface,
 	stopch <-chan struct{}, notifyClient notification.Client, schedule schedule.Schedule) *controller {
 
 	nsqueue := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
+	deletionqueue := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
 	backupqueue := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
-
+	// notificationretryqueue := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
 	Backupinf := dynInformer.ForResource(backupGVR).Informer()
 	Mongoinf := dynInformer.ForResource(mongoGVR).Informer()
 
@@ -110,10 +118,12 @@ func newController(client kubernetes.Interface, dynclient dynamic.Interface,
 		stateHistory: &StateHistory{
 			perNamespaceHistory: map[string]*NamespaceStateHistory{},
 		},
-		notifyClient: notifyClient,
-		nsqueue:      nsqueue,
-		backupqueue:  backupqueue,
-		schedule:     schedule,
+		notifyClient:  notifyClient,
+		nsqueue:       nsqueue,
+		backupqueue:   backupqueue,
+		schedule:      schedule,
+		deletionqueue: deletionqueue,
+		// notificationretryqueue: notificationretryqueue,
 	}
 
 	nsinformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -128,6 +138,7 @@ func newController(client kubernetes.Interface, dynclient dynamic.Interface,
 			AddFunc: func(obj interface{}) {
 				Logger.Info("Backup CREATE event")
 				c.SyncInformerCache()
+				Logger.Info("Backup CREATE event")
 				c.backupqueue.Add(obj)
 			},
 			UpdateFunc: func(old, new interface{}) {
@@ -136,7 +147,8 @@ func newController(client kubernetes.Interface, dynclient dynamic.Interface,
 			},
 			DeleteFunc: func(obj interface{}) {
 				Logger.Info("Backup is deleted")
-				c.handleCRDeletion(obj)
+				c.deletionqueue.Add(obj)
+				// c.handleCRDeletion(obj)
 			},
 		},
 	)
@@ -144,6 +156,7 @@ func newController(client kubernetes.Interface, dynclient dynamic.Interface,
 	Mongoinf.AddEventHandler(
 		cache.ResourceEventHandlerFuncs{
 			AddFunc: func(obj interface{}) {
+				Logger.Info("Mongo CREATE event")
 				c.SyncInformerCache()
 				Logger.Info("Mongo CREATE event")
 				c.backupqueue.Add(obj)
@@ -154,7 +167,8 @@ func newController(client kubernetes.Interface, dynclient dynamic.Interface,
 			},
 			DeleteFunc: func(obj interface{}) {
 				Logger.Info("Mongo is deleted")
-				c.handleCRDeletion(obj)
+				c.deletionqueue.Add(obj)
+				// c.handleCRDeletion(obj)
 			},
 		},
 	)
@@ -178,6 +192,7 @@ func (c *controller) run(stopch <-chan struct{}) {
 	Logger.Info("Started notification controller")
 	defer c.nsqueue.ShutDown()
 	defer c.backupqueue.ShutDown()
+	defer c.deletionqueue.ShutDown()
 
 	c.dynInformer.Start(stopch)
 	go c.nsinformer.Run(stopch)
@@ -185,6 +200,10 @@ func (c *controller) run(stopch <-chan struct{}) {
 	go wait.Until(c.nsworker, 1*time.Second, stopch)
 
 	go wait.Until(c.crworker, 1*time.Second, stopch)
+
+	go wait.Until(c.deletionWorker, 1*time.Second, stopch)
+
+	// go wait.Until(c.notificationRetryWorker, 1*time.Second, stopch)
 
 	<-stopch
 
@@ -199,6 +218,11 @@ func (c *controller) nsworker() {
 
 func (c *controller) crworker() {
 	for c.handleBackupAndMongoCreateUpdateEvents() {
+	}
+}
+
+func (c *controller) deletionWorker() {
+	for c.handleCRDeletion() {
 	}
 }
 
@@ -223,59 +247,82 @@ func (c *controller) handleNamespaceDeletion() bool {
 	if _, exists, _ := c.nsinformer.GetIndexer().GetByKey(key); exists {
 		Logger.Info("requeuing namespace deletion...", "Namespace", namespace)
 		c.nsqueue.AddAfter(item, 10*time.Second)
-	} else {
-		Logger.Info("Namespace deletion completed", "Namespace", namespace)
-		state := "Deleted"
-		if c.skipNotification(namespace, state, types.NOTFOUND, types.NOTFOUND, "") {
-			return true
-		}
-		note := notification.Note{
-			State:          state, //TODO: handle unknown state transition error
-			Namespace:      namespace,
-			FailureMessage: "",
-		}
-		if err := c.notifyClient.Send(note); err != nil {
-			Logger.Error(err, "Failed to send notification", "namespace", namespace)
-		}
-
-		c.nsqueue.Forget(key)
+		return true
 	}
+
+	Logger.Info("Namespace deletion completed", "Namespace", namespace)
+
+	var previousState types.Status
+	sh, ok := c.stateHistory.perNamespaceHistory[namespace]
+	if !ok {
+		previousState = types.Status("Unknown")
+	} else {
+		previousState = types.Status(sh.notification)
+	}
+
+	if !c.sendNotification(namespace, previousState, types.DELETED) {
+		c.nsqueue.AddAfter(item, 10*time.Second)
+		return true
+	}
+
+	c.updateStateHistory(namespace, NamespaceStateHistory{
+		notification: string(types.DELETED),
+		backupStatus: types.DELETED,
+		mongoStatus:  types.DELETED,
+	})
+	c.nsqueue.Forget(key)
 
 	return true
 }
 
-func (c *controller) handleCRDeletion(obj interface{}) {
-	var mongoStatus, backupStatus types.Status
-	var notificationstate string
-	u := obj.(*unstructured.Unstructured)
+func (c *controller) handleCRDeletion() bool {
+
+	item, quit := c.deletionqueue.Get()
+	if quit {
+		return false
+	}
+	defer c.deletionqueue.Done(item)
+
+	u := item.(*unstructured.Unstructured)
 	ns := u.Object["metadata"].(map[string]interface{})["namespace"].(string)
 
+	var mongoStatus, backupStatus types.Status
 	backupStatus = getCRStatus(c.backupLister, ns)
 	mongoStatus = getCRStatus(c.mongoLister, ns)
 
 	if (backupStatus == types.NOTFOUND && mongoStatus == types.AVAILABLE) ||
 		(backupStatus == types.AVAILABLE && mongoStatus == types.NOTFOUND) &&
 			(c.stateHistory.perNamespaceHistory[ns].notification == "Success") {
-		notificationstate = "NotReachable"
-		if c.skipNotification(ns, notificationstate, backupStatus, mongoStatus, "") {
-			return
+
+		var previousState types.Status
+		sh, ok := c.stateHistory.perNamespaceHistory[ns]
+		if !ok {
+			previousState = types.Status("Unknown")
+		} else {
+			previousState = types.Status(sh.notification)
 		}
-		note := notification.Note{
-			State:          notificationstate,
-			Namespace:      ns,
-			FailureMessage: "",
+
+		if !c.sendNotification(ns, previousState, types.NotReachable) {
+			c.deletionqueue.AddAfter(item, 10*time.Second)
+			return true
 		}
-		if err := c.notifyClient.Send(note); err != nil {
-			Logger.Error(err, "Failed to send notification", "namespace", ns)
-		}
+
+		c.updateStateHistory(ns, NamespaceStateHistory{
+			notification: string(types.NotReachable),
+			backupStatus: backupStatus,
+			mongoStatus:  mongoStatus,
+		})
+
 	}
-	Logger.Info("Skipping Notification. Current Status: ", "NameSpace", ns, "Backup", backupStatus, "Mongo", mongoStatus, "Notification", notificationstate, "Event", "CR Deletion")
+	return true
 }
 
 func (c *controller) handleBackupAndMongoCreateUpdateEvents() bool {
+
 	var mongoStatus, backupStatus, schedulerStatus types.Status
 	item, quit := c.backupqueue.Get()
 	if quit {
+
 		return false
 	}
 	defer c.backupqueue.Done(item)
@@ -305,10 +352,11 @@ func (c *controller) handleBackupAndMongoCreateUpdateEvents() bool {
 	}
 
 	if state == "Success" {
-		schedulerStatus, err := c.schedule.GetStatus(creationTime, ns)
-		if err != nil {
-			Logger.Error(err, "Failed to get scheduler status", "namespace", ns)
-		}
+		// schedulerStatus, err := c.schedule.GetStatus(creationTime, ns)
+		// if err != nil {
+		// 	Logger.Error(err, "Failed to get scheduler status", "namespace", ns)
+		// }
+		schedulerStatus = types.AVAILABLE
 		Logger.Info("", "SchedulerStatus", schedulerStatus, "NameSpace", ns)
 		state = notification.BackupAndSchedulerStatusMapping[string(types.AVAILABLE)][string(schedulerStatus)]
 		if state == "Provisioning" {
@@ -318,49 +366,66 @@ func (c *controller) handleBackupAndMongoCreateUpdateEvents() bool {
 		}
 	}
 
-	if c.skipNotification(ns, state, backupStatus, mongoStatus, schedulerStatus) {
+	var previousState types.Status
+	sh, ok := c.stateHistory.perNamespaceHistory[ns]
+	if !ok {
+		previousState = types.Status("Unknown")
+	} else {
+		previousState = types.Status(sh.notification)
+	}
+
+	c.updateStateHistory(ns, NamespaceStateHistory{
+		backupStatus:    backupStatus,
+		mongoStatus:     mongoStatus,
+		schedulerStatus: schedulerStatus,
+	})
+
+	if !c.sendNotification(ns, previousState, types.Status(state)) {
+		c.backupqueue.AddAfter(item, time.Duration(retryDelaySeconds)*time.Second)
 		return true
 	}
 
-	note := notification.Note{
-		State:          state, //TODO: handle unknown state transition error
-		Namespace:      ns,
-		FailureMessage: "",
-	}
-
-	err := c.notifyClient.Send(note) //TODO: check if notification send failed and retry in case of non 200
-	if err != nil {
-		Logger.Error(err, "Failed to send notification")
-	}
+	c.stateHistory.perNamespaceHistory[ns].notification = state
 
 	return true
 }
 
-func (c *controller) skipNotification(ns, state string, backupStatus, mongoStatus, schedulerStatus types.Status) bool {
-	msg, skip := "", false
+func (c *controller) updateStateHistory(ns string, new NamespaceStateHistory) {
+
+	Logger.Info("updating", "namespace", ns, "new", new)
+
 	c.stateHistory.Lock()
 
-	previousState, ok := c.stateHistory.perNamespaceHistory[ns]
-	if ok && previousState.notification == state {
-		msg, skip = "Skipping notification. ", true
-	}
+	// if new.schedulerStatus == "" && c.stateHistory.perNamespaceHistory[ns].schedulerStatus != "" {
+	// 	// we only query schedulerStatus
+	// 	// so if we dont know schedulerStatus in current reconcilation check for previous
+	// 	new.schedulerStatus = c.stateHistory.perNamespaceHistory[ns].schedulerStatus
+	// }
 
-	if ok && schedulerStatus == "" && c.stateHistory.perNamespaceHistory[ns].schedulerStatus != "" {
-		// we only query schedulerStatus
-		// so if we dont know schedulerStatus in current reconcilation check for previous
-		schedulerStatus = c.stateHistory.perNamespaceHistory[ns].schedulerStatus
-	}
-	c.stateHistory.perNamespaceHistory[ns] = &NamespaceStateHistory{
-		backupStatus:    backupStatus,
-		mongoStatus:     mongoStatus,
-		notification:    state,
-		lastUpdate:      time.Now(),
-		schedulerStatus: schedulerStatus,
-	}
+	new.lastUpdate = time.Now()
+	c.stateHistory.perNamespaceHistory[ns] = &new
 
-	Logger.Info(msg+"Current Status: ", "NameSpace", ns, "Backup", backupStatus, "Mongo", mongoStatus, "schedulerStatus", schedulerStatus, "Notification", state)
 	c.stateHistory.Unlock()
-	return skip
+}
+
+func (c *controller) sendNotification(ns string, previousState, newState types.Status) bool {
+
+	Logger.Info("Sending notification", "NameSpace", ns, "PreviousState", previousState, "NewState", newState)
+
+	if previousState == newState {
+		return true
+	}
+
+	note := notification.Note{
+		State:     string(newState),
+		Namespace: ns,
+	}
+
+	if err := c.notifyClient.Send(note); err != nil {
+		Logger.Error(err, "Failed to send notification", "namespace", ns)
+		return false
+	}
+	return true
 }
 
 func getCRStatus(lister cache.GenericLister, ns string) types.Status {
