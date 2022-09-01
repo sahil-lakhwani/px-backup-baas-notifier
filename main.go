@@ -99,7 +99,7 @@ func main() {
 	if ingressURL == "" {
 		log.Fatal("INGRESS_URL should not be empty")
 	}
-	notifyClient := notification.Client{WebhookURL: webhookURL, IngressURL: ingressURL}
+	notifyClient := notification.NewClient(webhookURL, ingressURL)
 
 	c := newController(clientset, dynClient, infFactory, stopch, notifyClient, *schedule)
 

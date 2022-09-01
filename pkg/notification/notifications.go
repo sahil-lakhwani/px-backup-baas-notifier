@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+
+	retryablehttp "github.com/hashicorp/go-retryablehttp"
 )
 
 // StatesAndNotificationsMapping represents all possible states and corresponding notification
@@ -66,6 +68,19 @@ type Note struct {
 type Client struct {
 	WebhookURL string
 	IngressURL string
+	client     http.Client
+}
+
+func NewClient(WebhookURL, IngressURL string) Client {
+	retryClient := retryablehttp.NewClient()
+	retryClient.RetryMax = 3
+
+	standardClient := retryClient.StandardClient()
+	return Client{
+		client:     *standardClient,
+		WebhookURL: WebhookURL,
+		IngressURL: IngressURL,
+	}
 }
 
 func (n *Client) Send(note Note) error {
@@ -80,8 +95,7 @@ func (n *Client) Send(note Note) error {
 		return err
 	}
 	request.Header.Set("Content-Type", "application/json; charset=UTF-8")
-	client := &http.Client{}
-	resp, err := client.Do(request)
+	resp, err := n.client.Do(request)
 	if err != nil {
 		return err
 	}
