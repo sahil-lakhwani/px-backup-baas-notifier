@@ -54,7 +54,7 @@ var SchedulerAndCRStatusMapping = map[string]map[string]string{
 	"Available": {
 		"Provisioning": "Provisioning",
 		"Failed":       "Failed",
-		"Available":    "Success",
+		"Success":      "Success",
 		"NotReachable": "NotReachable",
 		"NotFound":     "NotFound",
 		"Deleted":      "Deleted",
