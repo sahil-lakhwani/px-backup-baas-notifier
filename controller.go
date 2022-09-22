@@ -285,7 +285,7 @@ func (c *controller) handleBackupAndMongoCreateUpdateEvents() bool {
 	backupStatus = getCRStatus(c.backupLister, ns)
 	mongoStatus = getCRStatus(c.mongoLister, ns)
 
-	state := notification.StatesAndNotificationsMapping[string(backupStatus)][string(mongoStatus)]
+	combinedCRState := notification.StatesAndNotificationsMapping[string(backupStatus)][string(mongoStatus)]
 
 	if ((backupStatus == types.NOTFOUND && mongoStatus != types.NOTFOUND) ||
 		(backupStatus != types.NOTFOUND && mongoStatus == types.NOTFOUND)) &&
@@ -299,7 +299,7 @@ func (c *controller) handleBackupAndMongoCreateUpdateEvents() bool {
 		// Backup --> Pending/Available/ and Mongo --> types.NOTFOUND
 		// Idea here is to wait for 2 minutes before we send notification as defined in StatesAndNotificationsMapping \
 		// because CR creation might be delayed or cache has not been sync properly
-		state = "Provisioning"
+		combinedCRState = "Provisioning"
 	}
 
 	schedulerStatus, err := c.schedule.GetStatus(creationTime, ns)
@@ -307,34 +307,27 @@ func (c *controller) handleBackupAndMongoCreateUpdateEvents() bool {
 		Logger.Error(err, "Failed to get scheduler status", "namespace", ns)
 	}
 
-	if schedulerStatus == types.FAILED || schedulerStatus == types.Provisioning {
-		note := notification.Note{
-			State:        string(schedulerStatus), //TODO: handle unknown state transition error
-			InstanceName: ns,
-		}
+	Logger.Info("", "SchedulerStatus", schedulerStatus, "NameSpace", ns)
 
-		err := c.notifyClient.Send(note) //TODO: check if notification send failed and retry in case of non 200
-		if err != nil {
-			Logger.Error(err, "Failed to send notification")
-		}
-
+	if c.skipNotification(ns, combinedCRState, backupStatus, mongoStatus, schedulerStatus) {
 		return true
 	}
 
-	Logger.Info("", "SchedulerStatus", schedulerStatus, "NameSpace", ns)
-	state = notification.SchedulerAndCRStatusMapping[string(schedulerStatus)][string(state)]
-	if state == "Provisioning" {
+	var finalState string
+	if schedulerStatus == types.FAILED || schedulerStatus == types.Provisioning {
+		finalState = string(schedulerStatus)
+	} else {
+		finalState = notification.SchedulerAndCRStatusMapping[string(schedulerStatus)][string(combinedCRState)]
+	}
+
+	if finalState == "Provisioning" {
 		defer c.backupqueue.AddAfter(item, time.Duration(retryDelaySeconds)*time.Second)
 	} else {
 		defer c.backupqueue.Forget(item)
 	}
 
-	if c.skipNotification(ns, state, backupStatus, mongoStatus, schedulerStatus) {
-		return true
-	}
-
 	note := notification.Note{
-		State:        state, //TODO: handle unknown state transition error
+		State:        finalState, //TODO: handle unknown state transition error
 		InstanceName: ns,
 	}
 
