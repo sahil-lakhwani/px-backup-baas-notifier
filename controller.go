@@ -302,18 +302,31 @@ func (c *controller) handleBackupAndMongoCreateUpdateEvents() bool {
 		state = "Provisioning"
 	}
 
-	if state == "Success" {
-		schedulerStatus, err := c.schedule.GetStatus(creationTime, ns)
+	schedulerStatus, err := c.schedule.GetStatus(creationTime, ns)
+	if err != nil {
+		Logger.Error(err, "Failed to get scheduler status", "namespace", ns)
+	}
+
+	if schedulerStatus == types.FAILED || schedulerStatus == types.Provisioning {
+		note := notification.Note{
+			State:        string(schedulerStatus), //TODO: handle unknown state transition error
+			InstanceName: ns,
+		}
+
+		err := c.notifyClient.Send(note) //TODO: check if notification send failed and retry in case of non 200
 		if err != nil {
-			Logger.Error(err, "Failed to get scheduler status", "namespace", ns)
+			Logger.Error(err, "Failed to send notification")
 		}
-		Logger.Info("", "SchedulerStatus", schedulerStatus, "NameSpace", ns)
-		state = notification.BackupAndSchedulerStatusMapping[string(types.AVAILABLE)][string(schedulerStatus)]
-		if state == "Provisioning" {
-			defer c.backupqueue.AddAfter(item, time.Duration(retryDelaySeconds)*time.Second)
-		} else {
-			defer c.backupqueue.Forget(item)
-		}
+
+		return true
+	}
+
+	Logger.Info("", "SchedulerStatus", schedulerStatus, "NameSpace", ns)
+	state = notification.SchedulerAndCRStatusMapping[string(schedulerStatus)][string(state)]
+	if state == "Provisioning" {
+		defer c.backupqueue.AddAfter(item, time.Duration(retryDelaySeconds)*time.Second)
+	} else {
+		defer c.backupqueue.Forget(item)
 	}
 
 	if c.skipNotification(ns, state, backupStatus, mongoStatus, schedulerStatus) {
@@ -325,7 +338,7 @@ func (c *controller) handleBackupAndMongoCreateUpdateEvents() bool {
 		InstanceName: ns,
 	}
 
-	err := c.notifyClient.Send(note) //TODO: check if notification send failed and retry in case of non 200
+	err = c.notifyClient.Send(note) //TODO: check if notification send failed and retry in case of non 200
 	if err != nil {
 		Logger.Error(err, "Failed to send notification")
 	}

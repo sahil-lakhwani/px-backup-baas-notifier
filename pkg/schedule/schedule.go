@@ -58,7 +58,7 @@ func (s *Schedule) GetStatus(creationTime v1.Time, ns string) (types.Status, err
 		if time.Since(creationTime.Time) > time.Duration(s.ScheduleTimeout)*time.Minute { //TODO: make configurable backup timeout
 			return types.FAILED, nil
 		}
-		return types.PENDING, nil
+		return types.Provisioning, nil
 	}
 	return types.AVAILABLE, nil
 }
