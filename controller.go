@@ -309,10 +309,6 @@ func (c *controller) handleBackupAndMongoCreateUpdateEvents() bool {
 
 	Logger.Info("", "SchedulerStatus", schedulerStatus, "NameSpace", ns)
 
-	if c.skipNotification(ns, combinedCRState, backupStatus, mongoStatus, schedulerStatus) {
-		return true
-	}
-
 	var finalState string
 	if schedulerStatus == types.FAILED || schedulerStatus == types.Provisioning {
 		finalState = string(schedulerStatus)
@@ -324,6 +320,10 @@ func (c *controller) handleBackupAndMongoCreateUpdateEvents() bool {
 		defer c.backupqueue.AddAfter(item, time.Duration(retryDelaySeconds)*time.Second)
 	} else {
 		defer c.backupqueue.Forget(item)
+	}
+
+	if c.skipNotification(ns, finalState, backupStatus, mongoStatus, schedulerStatus) {
+		return true
 	}
 
 	note := notification.Note{
