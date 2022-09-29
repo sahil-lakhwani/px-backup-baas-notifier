@@ -50,11 +50,14 @@ var StatesAndNotificationsMapping = map[string]map[string]string{
 	},
 }
 
-var BackupAndSchedulerStatusMapping = map[string]map[string]string{
+var SchedulerAndCRStatusMapping = map[string]map[string]string{
 	"Available": {
-		"Pending":   "Provisioning",
-		"Failed":    "Failed",
-		"Available": "Success",
+		"Provisioning": "Provisioning",
+		"Failed":       "Failed",
+		"Success":      "Success",
+		"NotReachable": "NotReachable",
+		"NotFound":     "NotFound",
+		"Deleted":      "Deleted",
 	},
 }
 
