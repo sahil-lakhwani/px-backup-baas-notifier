@@ -5,9 +5,9 @@ import (
 	"log"
 	"net/url"
 	"os"
-	"strconv"
 	"time"
 
+	"github.com/caarlos0/env/v6"
 	"github.com/go-logr/logr"
 	"github.com/portworx/px-backup-baas-notifier/pkg/notification"
 	"github.com/portworx/px-backup-baas-notifier/pkg/schedule"
@@ -22,23 +22,26 @@ import (
 )
 
 var (
-	Logger            logr.Logger
-	nsLabel           string
-	retryDelaySeconds int
+	Logger  logr.Logger
+	nsLabel string
 )
+
+var appEnvConfig = AppEnvConfig{RetryDelaySeconds: 8, TokenDuration: "365d"}
 
 const (
 	ScheduleTimeout = 20
 )
 
 func init() {
-	var err error
-
 	opts := zap.Options{
 		Development: true,
 		TimeEncoder: zapcore.TimeEncoderOfLayout(time.RFC3339),
 	}
 	Logger = zap.New(zap.UseFlagOptions(&opts))
+
+	if err := env.Parse(&appEnvConfig); err != nil {
+		log.Fatal(err)
+	}
 
 	nsLabel = "" //os.Getenv("nsLabel")
 	// if nsLabel == "" {
@@ -50,17 +53,6 @@ func init() {
 	// 		os.Exit(1)
 	// 	}
 	// }
-
-	t := os.Getenv("RETRY_DELAY")
-	if t == "" {
-		retryDelaySeconds = 8
-	} else {
-		retryDelaySeconds, err = strconv.Atoi(t)
-		if err != nil {
-			log.Fatalf("Failed to Parse retryDelaySeconds env")
-		}
-	}
-
 }
 
 func main() {
@@ -71,11 +63,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	schedule := createSchdeule(Logger)
+	schedule := schedule.NewSchedule(appEnvConfig.SchedulerURL, int64(ScheduleTimeout), schedule.TokenConfig{
+		ClientID:      appEnvConfig.ClientID,
+		UserName:      appEnvConfig.UserName,
+		Password:      appEnvConfig.Password,
+		TokenDuration: appEnvConfig.TokenDuration,
+		TokenURL:      appEnvConfig.TokenURL,
+	}, Logger)
 
-	webhookURL := os.Getenv("WEBHOOK_URL")
-	if !isUrl(webhookURL) {
-		Logger.Info("Invalid webhook url configured", "webhookUrl", webhookURL)
+	if !isUrl(appEnvConfig.WebhookURL) {
+		Logger.Info("Invalid webhook url configured", "webhookUrl", appEnvConfig.WebhookURL)
 		os.Exit(1)
 	}
 
@@ -95,11 +92,7 @@ func main() {
 
 	stopch := make(<-chan struct{})
 
-	ingressURL := os.Getenv("INGRESS_URL")
-	if ingressURL == "" {
-		log.Fatal("INGRESS_URL should not be empty")
-	}
-	notifyClient := notification.NewClient(webhookURL, ingressURL)
+	notifyClient := notification.NewClient(appEnvConfig.WebhookURL, appEnvConfig.IngressURL)
 
 	c := newController(clientset, dynClient, infFactory, stopch, notifyClient, *schedule)
 
@@ -112,54 +105,12 @@ func isUrl(str string) bool {
 	return err == nil && u.Scheme != "" && u.Host != ""
 }
 
-func createSchdeule(logger logr.Logger) *schedule.Schedule {
-	clientID := os.Getenv("CLIENT_ID")
-	if clientID == "" {
-		log.Fatal("ClientID should not be empty")
-	}
-
-	userName := os.Getenv("USERNAME")
-	if userName == "" {
-		log.Fatal("UserName should not be empty")
-	}
-
-	password := os.Getenv("PASSWORD")
-	if password == "" {
-		log.Fatal("Password should not be empty")
-	}
-
-	tokenDuration := os.Getenv("TOKEN_DURATION")
-	if tokenDuration == "" {
-		tokenDuration = "365d"
-	}
-
-	tokenURL := os.Getenv("TOKEN_URL")
-	if tokenURL == "" {
-		log.Fatal("TokenURL should not be empty")
-	}
-
-	schedulerUrl := os.Getenv("SCHEDULE_URL")
-	if schedulerUrl == "" {
-		log.Fatal("SchedulerUrl should not be empty")
-	}
-	schdeule := schedule.NewSchedule(schedulerUrl, int64(ScheduleTimeout), schedule.TokenConfig{
-		ClientID:      clientID,
-		UserName:      userName,
-		Password:      password,
-		TokenDuration: tokenDuration,
-		TokenURL:      tokenURL,
-	}, logger)
-
-	return schdeule
-}
-
 func kubeconfig() (*rest.Config, error) {
-	var kubeconfigfile string = os.Getenv("kubeconfigfile")
-	if kubeconfigfile == "" {
-		kubeconfigfile = os.Getenv("HOME") + "/.kube/config"
+	if appEnvConfig.KubeConfigFile == "" {
+		appEnvConfig.KubeConfigFile = os.Getenv("HOME") + "/.kube/config"
 	}
 
-	kubeconfig := flag.String("kubeconfig", kubeconfigfile, "absolute path to the kubeconfig file")
+	kubeconfig := flag.String("kubeconfig", appEnvConfig.KubeConfigFile, "absolute path to the kubeconfig file")
 	config, err := clientcmd.BuildConfigFromFlags("", *kubeconfig)
 	if err != nil {
 		Logger.Info("Error loading kube configuration from directory")
