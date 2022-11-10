@@ -310,7 +310,7 @@ func (c *controller) handleBackupAndMongoCreateUpdateEvents() bool {
 		Logger.Info("", "SchedulerStatus", schedulerStatus, "NameSpace", ns)
 		state = notification.BackupAndSchedulerStatusMapping[string(types.AVAILABLE)][string(schedulerStatus)]
 		if state == "Provisioning" {
-			defer c.backupqueue.AddAfter(item, time.Duration(retryDelaySeconds)*time.Second)
+			defer c.backupqueue.AddAfter(item, time.Duration(appEnvConfig.RetryDelaySeconds)*time.Second)
 		} else {
 			defer c.backupqueue.Forget(item)
 		}
