@@ -21,6 +21,8 @@ spec:
       - command:
         - /controller
         env:
+          - name: "SCHEDULE_TIMEOUT"
+            value: "45"
           - name: INGRESS_URL
             value: backupui-dev01.baas.portworx.dev
           - name: "WEBHOOK_URL"

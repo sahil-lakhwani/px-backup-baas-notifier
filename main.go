@@ -27,10 +27,6 @@ var (
 	retryDelaySeconds int
 )
 
-const (
-	ScheduleTimeout = 20
-)
-
 func init() {
 	var err error
 
@@ -142,7 +138,17 @@ func createSchdeule(logger logr.Logger) *schedule.Schedule {
 	if schedulerUrl == "" {
 		log.Fatal("SchedulerUrl should not be empty")
 	}
-	schdeule := schedule.NewSchedule(schedulerUrl, int64(ScheduleTimeout), schedule.TokenConfig{
+
+	schedulerTimeout := os.Getenv("SCHEDULE_TIMEOUT")
+	if schedulerTimeout == "" {
+		schedulerTimeout = "45"
+	}
+	timeout, err := strconv.Atoi(schedulerTimeout)
+	if err != nil {
+		Logger.Error(err, "required interger value for SCHEDULE_TIMEOUT")
+		os.Exit(1)
+	}
+	schdeule := schedule.NewSchedule(schedulerUrl, int64(timeout), schedule.TokenConfig{
 		ClientID:      clientID,
 		UserName:      userName,
 		Password:      password,
