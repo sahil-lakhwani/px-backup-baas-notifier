@@ -39,6 +39,7 @@ type controller struct {
 	nsqueue             workqueue.RateLimitingInterface
 	backupqueue         workqueue.RateLimitingInterface
 	schedule            schedule.Schedule
+	retryDelaySeconds   int
 }
 
 var backupGVR = schema.GroupVersionResource{
@@ -69,7 +70,7 @@ type StateHistory struct {
 // Create Informers and add eventhandlers
 func newController(client kubernetes.Interface, dynclient dynamic.Interface,
 	dynInformer dynamicinformer.DynamicSharedInformerFactory,
-	stopch <-chan struct{}, notifyClient notification.Client, schedule schedule.Schedule) *controller {
+	stopch <-chan struct{}, notifyClient notification.Client, schedule schedule.Schedule, retryDelaySeconds int) *controller {
 
 	nsqueue := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
 	backupqueue := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
@@ -110,10 +111,11 @@ func newController(client kubernetes.Interface, dynclient dynamic.Interface,
 		stateHistory: &StateHistory{
 			perNamespaceHistory: map[string]*NamespaceStateHistory{},
 		},
-		notifyClient: notifyClient,
-		nsqueue:      nsqueue,
-		backupqueue:  backupqueue,
-		schedule:     schedule,
+		notifyClient:      notifyClient,
+		nsqueue:           nsqueue,
+		backupqueue:       backupqueue,
+		schedule:          schedule,
+		retryDelaySeconds: retryDelaySeconds,
 	}
 
 	nsinformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -317,7 +319,7 @@ func (c *controller) handleBackupAndMongoCreateUpdateEvents() bool {
 	}
 
 	if finalState == "Provisioning" {
-		defer c.backupqueue.AddAfter(item, time.Duration(retryDelaySeconds)*time.Second)
+		defer c.backupqueue.AddAfter(item, time.Duration(c.retryDelaySeconds)*time.Second)
 	} else {
 		defer c.backupqueue.Forget(item)
 	}

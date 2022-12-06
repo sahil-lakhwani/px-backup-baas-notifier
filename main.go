@@ -5,10 +5,11 @@ import (
 	"log"
 	"net/url"
 	"os"
-	"strconv"
 	"time"
 
+	"github.com/caarlos0/env/v6"
 	"github.com/go-logr/logr"
+	"github.com/portworx/px-backup-baas-notifier/pkg/config"
 	"github.com/portworx/px-backup-baas-notifier/pkg/notification"
 	"github.com/portworx/px-backup-baas-notifier/pkg/schedule"
 	"go.uber.org/zap/zapcore"
@@ -22,14 +23,11 @@ import (
 )
 
 var (
-	Logger            logr.Logger
-	nsLabel           string
-	retryDelaySeconds int
+	Logger  logr.Logger
+	nsLabel string
 )
 
 func init() {
-	var err error
-
 	opts := zap.Options{
 		Development: true,
 		TimeEncoder: zapcore.TimeEncoderOfLayout(time.RFC3339),
@@ -46,32 +44,31 @@ func init() {
 	// 		os.Exit(1)
 	// 	}
 	// }
-
-	t := os.Getenv("RETRY_DELAY")
-	if t == "" {
-		retryDelaySeconds = 8
-	} else {
-		retryDelaySeconds, err = strconv.Atoi(t)
-		if err != nil {
-			log.Fatalf("Failed to Parse retryDelaySeconds env")
-		}
-	}
-
 }
 
 func main() {
 
-	config, err := kubeconfig()
+	var appEnvConfig = config.NewAppConfig()
+	if err := env.Parse(&appEnvConfig); err != nil {
+		log.Fatal(err)
+	}
+
+	config, err := kubeconfig(appEnvConfig.KubeConfigFile)
 	if err != nil {
 		Logger.Error(err, "Could not load config from kubeconfig")
 		os.Exit(1)
 	}
 
-	schedule := createSchdeule(Logger)
+	schedule := schedule.NewSchedule(appEnvConfig.SchedulerURL, appEnvConfig.ScheduleTimeout, schedule.TokenConfig{
+		ClientID:      appEnvConfig.ClientID,
+		UserName:      appEnvConfig.UserName,
+		Password:      appEnvConfig.Password,
+		TokenDuration: appEnvConfig.TokenDuration,
+		TokenURL:      appEnvConfig.TokenURL,
+	}, Logger)
 
-	webhookURL := os.Getenv("WEBHOOK_URL")
-	if !isUrl(webhookURL) {
-		Logger.Info("Invalid webhook url configured", "webhookUrl", webhookURL)
+	if !isUrl(appEnvConfig.WebhookURL) {
+		Logger.Info("Invalid webhook url configured", "webhookUrl", appEnvConfig.WebhookURL)
 		os.Exit(1)
 	}
 
@@ -91,13 +88,9 @@ func main() {
 
 	stopch := make(<-chan struct{})
 
-	ingressURL := os.Getenv("INGRESS_URL")
-	if ingressURL == "" {
-		log.Fatal("INGRESS_URL should not be empty")
-	}
-	notifyClient := notification.NewClient(webhookURL, ingressURL)
+	notifyClient := notification.NewClient(appEnvConfig.WebhookURL, appEnvConfig.IngressURL)
 
-	c := newController(clientset, dynClient, infFactory, stopch, notifyClient, *schedule)
+	c := newController(clientset, dynClient, infFactory, stopch, notifyClient, *schedule, appEnvConfig.RetryDelaySeconds)
 
 	c.run(stopch)
 
@@ -108,64 +101,12 @@ func isUrl(str string) bool {
 	return err == nil && u.Scheme != "" && u.Host != ""
 }
 
-func createSchdeule(logger logr.Logger) *schedule.Schedule {
-	clientID := os.Getenv("CLIENT_ID")
-	if clientID == "" {
-		log.Fatal("ClientID should not be empty")
+func kubeconfig(kubeConfigFile string) (*rest.Config, error) {
+	if kubeConfigFile == "" {
+		kubeConfigFile = os.Getenv("HOME") + "/.kube/config"
 	}
 
-	userName := os.Getenv("USERNAME")
-	if userName == "" {
-		log.Fatal("UserName should not be empty")
-	}
-
-	password := os.Getenv("PASSWORD")
-	if password == "" {
-		log.Fatal("Password should not be empty")
-	}
-
-	tokenDuration := os.Getenv("TOKEN_DURATION")
-	if tokenDuration == "" {
-		tokenDuration = "365d"
-	}
-
-	tokenURL := os.Getenv("TOKEN_URL")
-	if tokenURL == "" {
-		log.Fatal("TokenURL should not be empty")
-	}
-
-	schedulerUrl := os.Getenv("SCHEDULE_URL")
-	if schedulerUrl == "" {
-		log.Fatal("SchedulerUrl should not be empty")
-	}
-
-	schedulerTimeout := os.Getenv("SCHEDULE_TIMEOUT")
-	if schedulerTimeout == "" {
-		schedulerTimeout = "45"
-	}
-	timeout, err := strconv.Atoi(schedulerTimeout)
-	if err != nil {
-		Logger.Error(err, "required interger value for SCHEDULE_TIMEOUT")
-		os.Exit(1)
-	}
-	schdeule := schedule.NewSchedule(schedulerUrl, int64(timeout), schedule.TokenConfig{
-		ClientID:      clientID,
-		UserName:      userName,
-		Password:      password,
-		TokenDuration: tokenDuration,
-		TokenURL:      tokenURL,
-	}, logger)
-
-	return schdeule
-}
-
-func kubeconfig() (*rest.Config, error) {
-	var kubeconfigfile string = os.Getenv("kubeconfigfile")
-	if kubeconfigfile == "" {
-		kubeconfigfile = os.Getenv("HOME") + "/.kube/config"
-	}
-
-	kubeconfig := flag.String("kubeconfig", kubeconfigfile, "absolute path to the kubeconfig file")
+	kubeconfig := flag.String("kubeconfig", kubeConfigFile, "absolute path to the kubeconfig file")
 	config, err := clientcmd.BuildConfigFromFlags("", *kubeconfig)
 	if err != nil {
 		Logger.Info("Error loading kube configuration from directory")
